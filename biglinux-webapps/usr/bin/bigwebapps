@@ -16,4 +16,9 @@ fi
 # Start caching json
 ./get_json.sh cache &
 
-bigbashview -s 1000x580 -n bigwebapps -p bigwebapps -c transparent -w frameless index.html
+bbv -s 1000x580 \
+            -n bigwebapps \
+            -p bigwebapps \
+            -c transparent \
+            -w frameless index.html \
+            -i /usr/share/icons/hicolor/scalable/apps/webapps.svg
