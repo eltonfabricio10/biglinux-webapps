@@ -6,15 +6,11 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, Adw, GObject
+from gi.repository import Gtk, Adw, GObject, Gdk
 
 # Import shared browser icon utilities
 from webapps.utils.browser_icon_utils import set_image_from_browser_icon
-
-# Setup translation
-import gettext
-
-_ = gettext.gettext
+from webapps.utils.translation import _
 
 
 class BrowserDialog(Adw.Window):
@@ -37,6 +33,13 @@ class BrowserDialog(Adw.Window):
         self.browser_collection = browser_collection
         self.selected_browser = None
 
+        # Get the command executor from parent if available
+        # This is needed to detect the system default browser
+        if hasattr(parent, "command_executor"):
+            self.command_executor = parent.command_executor
+        else:
+            self.command_executor = None
+
         # Create UI
         self.setup_ui()
 
@@ -48,6 +51,11 @@ class BrowserDialog(Adw.Window):
         content.set_margin_bottom(12)
         content.set_margin_start(12)
         content.set_margin_end(12)
+
+        # Add key event controller to handle ESC key to close dialog
+        key_controller = Gtk.EventControllerKey.new()
+        key_controller.connect("key-pressed", self.on_key_pressed)
+        self.add_controller(key_controller)
 
         # Header
         header = Adw.HeaderBar()
@@ -64,15 +72,37 @@ class BrowserDialog(Adw.Window):
         # Get all browsers
         browsers = self.browser_collection.get_all()
 
+        # Try to get system default browser ID if command executor is available
+        self.system_default_browser_id = None
+        if self.command_executor and hasattr(
+            self.command_executor, "get_system_default_browser"
+        ):
+            self.system_default_browser_id = (
+                self.command_executor.get_system_default_browser()
+            )
+            print(f"System default browser detected: {self.system_default_browser_id}")
+
         # Add browser options to the list box
         for browser in browsers:
             row = self._create_browser_row(browser)
             list_box.append(row)
 
-            # Select the current browser
+            # Select browser in the list - prioritize:
+            # 1. Current browser from webapp (if set)
+            # 2. System default browser (if detected and no current browser)
             if browser.browser_id == self.webapp.browser:
                 list_box.select_row(row)
                 self.selected_browser = browser
+                print(f"Selected existing browser: {browser.browser_id}")
+            elif (
+                not self.webapp.browser
+                and not self.selected_browser
+                and self.system_default_browser_id
+                and browser.browser_id == self.system_default_browser_id
+            ):
+                list_box.select_row(row)
+                self.selected_browser = browser
+                print(f"Selected system default browser: {browser.browser_id}")
 
         # Add the list box to a scrolled window
         scrolled = Gtk.ScrolledWindow()
@@ -135,8 +165,19 @@ class BrowserDialog(Adw.Window):
         label.set_hexpand(True)
         box.append(label)
 
-        # Default indicator
-        if browser.is_default:
+        # Default indicator - only show System Default, or Default if no system default is detected
+        is_system_default = (
+            hasattr(self, "system_default_browser_id")
+            and self.system_default_browser_id == browser.browser_id
+        )
+
+        if is_system_default:
+            default_label = Gtk.Label(label=_("System Default"))
+            default_label.add_css_class("caption")
+            default_label.add_css_class("dim-label")
+            box.append(default_label)
+        elif browser.is_default and not self.system_default_browser_id:
+            # Only show this if no system default was detected
             default_label = Gtk.Label(label=_("Default"))
             default_label.add_css_class("caption")
             default_label.add_css_class("dim-label")
@@ -185,3 +226,11 @@ class BrowserDialog(Adw.Window):
             Browser: Selected browser
         """
         return self.selected_browser
+
+    def on_key_pressed(self, controller, keyval, keycode, state):
+        """Handle key press events"""
+        if keyval == Gdk.KEY_Escape:
+            self.close()
+            self.emit("response", Gtk.ResponseType.CANCEL)
+            return True
+        return False

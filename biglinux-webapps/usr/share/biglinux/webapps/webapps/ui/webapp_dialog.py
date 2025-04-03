@@ -5,11 +5,10 @@ WebAppDialog module containing the dialog for creating and editing webapps
 import gi
 import time
 import uuid
-import gettext
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, Adw, GObject, GdkPixbuf
+from gi.repository import Gtk, Adw, GObject, GdkPixbuf, Gdk
 
 # Import BrowserDialog
 from webapps.ui.browser_dialog import BrowserDialog
@@ -20,8 +19,8 @@ from webapps.utils.url_utils import WebsiteInfoFetcher
 # Import the browser icon utilities
 from webapps.utils.browser_icon_utils import set_image_from_browser_icon
 
-# Setup translation
-_ = gettext.gettext
+# Import the centralized translation function
+from webapps.utils.translation import _
 
 
 class WebAppDialog(Adw.Window):
@@ -64,6 +63,43 @@ class WebAppDialog(Adw.Window):
         # Clone the webapp to avoid modifying the original
         self.webapp = self._clone_webapp(webapp)
 
+        # Try to detect the system default browser
+        self.system_default_browser_id = None
+        if self.command_executor:
+            self.system_default_browser_id = (
+                self.command_executor.get_system_default_browser()
+            )
+            print(f"System default browser detected: {self.system_default_browser_id}")
+
+        # For new webapps, always use the system default browser if available
+        if self.is_new and self.system_default_browser_id:
+            # Check if this browser exists in our collection
+            system_browser = self.browser_collection.get_by_id(
+                self.system_default_browser_id
+            )
+            if system_browser:
+                # Override any previously selected browser with the system default
+                original_browser = self.webapp.browser
+                self.webapp.browser = self.system_default_browser_id
+                print(
+                    f"Overriding browser selection: {original_browser} → {self.system_default_browser_id}"
+                )
+            else:
+                # Fallback to the app's default browser if the system browser isn't supported
+                if not self.webapp.browser:  # Only if no browser is already selected
+                    default_browser = self.browser_collection.get_default()
+                    if default_browser:
+                        self.webapp.browser = default_browser.browser_id
+                        print(
+                            f"System browser not supported, using app default: {default_browser.browser_id}"
+                        )
+        # If no browser is set at all and system detection failed, use the app's default browser
+        elif self.is_new and not self.webapp.browser:
+            default_browser = self.browser_collection.get_default()
+            if default_browser:
+                self.webapp.browser = default_browser.browser_id
+                print(f"Using app default browser: {default_browser.browser_id}")
+
         # Create UI
         self.setup_ui()
 
@@ -97,6 +133,11 @@ class WebAppDialog(Adw.Window):
         """Set up the UI components"""
         # Create main layout with content area
         content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+
+        # Add key event controller to handle ESC key to close dialog
+        key_controller = Gtk.EventControllerKey.new()
+        key_controller.connect("key-pressed", self.on_key_pressed)
+        self.add_controller(key_controller)
 
         # Define the window title based on whether we're adding or editing
         title = self.is_new and _("Add WebApp") or _("Edit WebApp")
@@ -193,26 +234,29 @@ class WebAppDialog(Adw.Window):
         main_category = self.webapp.get_main_category()
         self.category_dropdown = Gtk.DropDown()
         category_model = Gtk.StringList()
-        categories = [
-            _("Development"),
-            _("Office"),
-            _("Graphics"),
-            _("Network"),
-            _("Game"),
-            _("AudioVideo"),
-            _("Webapps"),
-            _("Utility"),
-            _("System"),
+
+        # Store both system and display names for categories
+        self.system_categories = [
+            "Webapps",  # Our custom category - always first
+            "Network",  # Common in most DEs
+            "Office",  # Common in most DEs
+            "Development",  # Common in most DEs
+            "Graphics",  # Common in most DEs
+            "AudioVideo",  # Common name in some DEs
+            "Game",  # Common in most DEs
+            "Utility",  # Common in GNOME
+            "System",  # Common in most DEs
         ]
 
-        for category in categories:
-            category_model.append(category)
+        # Display translated category names in UI
+        for category in self.system_categories:
+            category_model.append(_(category))
 
         self.category_dropdown.set_model(category_model)
         self.category_dropdown.set_valign(Gtk.Align.CENTER)
 
-        # Set the current category
-        for i, category in enumerate(categories):
+        # Set the current category - find the untranslated one that matches our current category
+        for i, category in enumerate(self.system_categories):
             if category == main_category:
                 self.category_dropdown.set_selected(i)
                 break
@@ -256,7 +300,14 @@ class WebAppDialog(Adw.Window):
 
         self.profile_switch = Gtk.Switch()
         self.profile_switch.set_valign(Gtk.Align.CENTER)
-        self.profile_switch.set_active(self.webapp.app_profile != _("Default"))
+
+        # For new webapps, always set the switch to inactive by default
+        # For existing webapps, set based on profile name
+        if self.is_new:
+            self.profile_switch.set_active(False)
+        else:
+            self.profile_switch.set_active(self.webapp.app_profile != "Browser")
+
         self.profile_switch.connect("notify::active", self.on_profile_switch_changed)
         self.profile_row.add_suffix(self.profile_switch)
 
@@ -372,6 +423,14 @@ class WebAppDialog(Adw.Window):
         # Use set_content() instead of set_child() for Adw.Window
         self.set_content(overlay)
 
+    def on_key_pressed(self, controller, keyval, keycode, state):
+        """Handle key press events"""
+        if keyval == Gdk.KEY_Escape:
+            self.close()
+            self.emit("response", Gtk.ResponseType.CANCEL)
+            return True
+        return False
+
     def set_icon_from_path(self, icon_path):
         """
         Set the icon from a file path or icon name
@@ -413,7 +472,8 @@ class WebAppDialog(Adw.Window):
         """
         browser = self.browser_collection.get_by_id(browser_id)
         if browser:
-            self.browser_label.set_text(browser.get_friendly_name())
+            label_text = browser.get_friendly_name()
+            self.browser_label.set_text(label_text)
         else:
             self.browser_label.set_text(browser_id)
 
@@ -425,21 +485,49 @@ class WebAppDialog(Adw.Window):
         """Handle name entry changes"""
         self.webapp.app_name = entry.get_text()
 
-    def on_category_changed(self, dropdown, _):
+    def on_category_changed(self, dropdown, param):
         """Handle category dropdown changes"""
         selected = dropdown.get_selected()
-        model = dropdown.get_model()
-        category = model.get_string(selected)
-        self.webapp.set_main_category(category)
 
-    def on_profile_switch_changed(self, switch, _):
+        # Debug selected index and available categories
+        print(f"Selected category index: {selected}")
+        print(f"System categories: {self.system_categories}")
+
+        # Use the system categories list to get the untranslated category name
+        if hasattr(self, "system_categories") and 0 <= selected < len(
+            self.system_categories
+        ):
+            # Get the original untranslated system category name
+            system_category = self.system_categories[selected]
+
+            # Make sure we're using the exact correct system category name
+            # Force Development to exactly match the desktop entry standard
+            if system_category.lower() == "development":
+                system_category = "Development"
+
+            self.webapp.set_main_category(system_category)
+            print(f"Category set to: {system_category} (system name)")
+        else:
+            # Fallback to the display name if something goes wrong
+            model = dropdown.get_model()
+            display_category = model.get_string(selected)
+            self.webapp.set_main_category(display_category)
+            print(f"Fallback: using display category: {display_category}")
+
+    def on_profile_switch_changed(self, switch, param):
         """Handle profile switch changes"""
         active = switch.get_active()
         self.profile_entry_row.set_visible(active)
 
         if not active:
-            self.webapp.app_profile = _("Default")
-            self.profile_entry_row.set_text(_("Default"))
+            # Set to "Browser" when switch is off
+            self.webapp.app_profile = "Browser"
+            self.profile_entry_row.set_text("Browser")
+        else:
+            # Set to "Default" when switch is on and profile was "Browser"
+            if self.webapp.app_profile == "Browser":
+                self.webapp.app_profile = "Default"
+                self.profile_entry_row.set_text("Default")
 
     def on_profile_entry_changed(self, entry):
         """Handle profile entry changes"""
@@ -588,7 +676,7 @@ class WebAppDialog(Adw.Window):
             if browser.is_firefox_based():
                 self.profile_row.set_visible(False)
                 self.profile_entry_row.set_visible(False)
-                self.webapp.app_profile = _("Default")
+                self.webapp.app_profile = "Default"
             else:
                 self.profile_row.set_visible(True)
                 self.profile_entry_row.set_visible(self.profile_switch.get_active())
